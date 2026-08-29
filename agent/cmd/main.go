@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -9,14 +8,17 @@ import (
 	"time"
 
 	"nangman-platform/agent/collector"
+	"nangman-platform/agent/streamer"
 )
 
 func main() {
 	hostname, _ := os.Hostname()
+	stream := streamer.NewStreamer()
+
 	fmt.Println("==================================================================")
-	fmt.Println("🚀 Nangman-Agent v1.0 (Kernel Telemetry & PSI Diagnostic Daemon)")
+	fmt.Println("🚀 Nangman-Agent v1.1 (Kernel Telemetry & Live Streaming Daemon)")
 	fmt.Printf("📍 Node Hostname: %s | PID: %d\n", hostname, os.Getpid())
-	fmt.Println("📡 Collecting /sys/thermal, /proc/pressure, /proc/meminfo (500ms interval)")
+	fmt.Printf("📡 Streaming to Hub Target: %s (500ms interval)\n", stream.HubURL)
 	fmt.Println("==================================================================")
 
 	// Ctrl+C 시 안전하게 종료 처리
@@ -54,13 +56,12 @@ func main() {
 				RPiHealth:  rpi,
 			}
 
-			// 2. JSON 직렬화 및 터미널 요약 출력
-			jsonBytes, err := json.MarshalIndent(payload, "", "  ")
-			if err == nil {
-				fmt.Println(string(jsonBytes))
-				fmt.Printf("--- [CPU: %.1f°C | Mem: %.1fMB(%.1f%%) | Disk: %.1fGB(%.1f%%, Inode: %.1f%%) | TCP Retrans: %d | Cgroups: %d] ---\n\n",
-					thermal.CPUTempCelsius, mem.UsedMB, mem.UsagePct, disk.UsedGB, disk.UsagePct, disk.InodeUsedPct, net.TCPRetransTotal, len(cgroups))
-			}
+			// 2. 중앙 Hub 서버로 비동기 네트워크 스트리밍 전송
+			stream.SendAsync(payload)
+
+			// 3. 로컬 터미널 1줄 요약 출력
+			fmt.Printf("[%s] CPU: %.1f°C | Mem: %.1fMB(%.1f%%) | Disk: %.1fGB(%.1f%%) | Retrans: %d | Cgroups: %d | 📡 Streaming OK\n",
+				t.Format("15:04:05.000"), thermal.CPUTempCelsius, mem.UsedMB, mem.UsagePct, disk.UsedGB, disk.UsagePct, net.TCPRetransTotal, len(cgroups))
 		}
 	}
 }
