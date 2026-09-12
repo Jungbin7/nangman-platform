@@ -24,10 +24,11 @@ type ThermalMetrics struct {
 
 // PSIMetrics: 리눅스 커널 3대 압박 지수 (/proc/pressure)
 type PSIMetrics struct {
-	MemoryPressure string  `json:"memory_pressure_full"`
-	MemoryAvg10    float64 `json:"memory_avg10"`
-	CPUPressure    string  `json:"cpu_pressure_some"`
-	IOPressure     string  `json:"io_pressure_full"`
+	MemoryPressure  string  `json:"memory_pressure_full"`
+	MemoryAvg10     float64 `json:"memory_avg10"`
+	MemorySomeAvg10 float64 `json:"memory_some_avg10"` // 초기 압박 조짐 감지용 (some avg10)
+	CPUPressure     string  `json:"cpu_pressure_some"`
+	IOPressure      string  `json:"io_pressure_full"`
 }
 
 // MemoryMetrics: /proc/meminfo 기반 정밀 메모리 메트릭
@@ -56,6 +57,7 @@ type NetworkMetrics struct {
 	RxBytesSec      uint64 `json:"rx_bytes_sec"`
 	TxBytesSec      uint64 `json:"tx_bytes_sec"`
 	TCPRetransTotal uint64 `json:"tcp_retrans_total"` // TCP 패킷 재전송 (VPN 터널 불안정성 감지)
+	TCPRetransDelta uint64 `json:"tcp_retrans_delta"` // 직전 수집 대비 증가분 (실시간 장애 감지용)
 	TCPErrors       uint64 `json:"tcp_in_errors"`
 }
 

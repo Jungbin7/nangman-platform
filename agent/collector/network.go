@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// 이전 수집 시점의 TCP RetransSegs 누적값 (Delta 계산용)
+var prevRetrans uint64 = 0
+
 // ReadNetwork: /proc/net/dev(대역폭)와 /proc/net/snmp(TCP 재전송/에러)를 파싱합니다.
 func ReadNetwork() (NetworkMetrics, error) {
 	metrics := NetworkMetrics{}
@@ -60,5 +63,12 @@ func ReadNetwork() (NetworkMetrics, error) {
 		}
 	}
 
+	// 3. Delta 계산: 직전 수집과의 차이로 "지금 당장" 재전송이 발생 중인지 판별
+	if prevRetrans > 0 && metrics.TCPRetransTotal >= prevRetrans {
+		metrics.TCPRetransDelta = metrics.TCPRetransTotal - prevRetrans
+	}
+	prevRetrans = metrics.TCPRetransTotal
+
 	return metrics, nil
 }
+

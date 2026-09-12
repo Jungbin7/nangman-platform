@@ -20,6 +20,9 @@ func ReadPSI() (PSIMetrics, error) {
 	if memData, err := os.ReadFile("/proc/pressure/memory"); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(memData)), "\n")
 		for _, line := range lines {
+			if strings.HasPrefix(line, "some") {
+				metrics.MemorySomeAvg10 = parseAvg10(line)
+			}
 			if strings.HasPrefix(line, "full") {
 				metrics.MemoryPressure = line
 				// "full avg10=1.25 avg60=0.50 avg300=0.10 total=12400" 에서 avg10 파싱

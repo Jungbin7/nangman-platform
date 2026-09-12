@@ -28,7 +28,7 @@ func ReadCPUTemp() (ThermalMetrics, error) {
 			if err == nil {
 				// 리눅스 커널은 48250처럼 1000배수로 온도를 표현합니다 (밀리섭씨).
 				metrics.CPUTempCelsius = rawVal / 1000.0
-				if metrics.CPUTempCelsius > 70.0 {
+				if metrics.CPUTempCelsius > 82.0 {
 					metrics.IsThrottled = true
 				}
 				return metrics, nil
