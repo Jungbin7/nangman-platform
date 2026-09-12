@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"nangman-platform/agent/collector"
 	"nangman-platform/hub/metrics"
@@ -81,6 +83,15 @@ func main() {
 	}
 }
 
+// pad: UTF-8 글자 수를 기준으로 우측 공백을 채워 터미널 칸을 1픽셀 오차 없이 정렬합니다.
+func pad(s string, width int) string {
+	rLen := utf8.RuneCountInString(s)
+	if rLen >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-rLen)
+}
+
 // renderTUIDashboard: 빅테크(Stripe, Vercel, Google Cloud) 스타일의 미니멀 모던 CLI 대시보드
 func renderTUIDashboard(clusterStore *store.ClusterStore) {
 	ticker := time.NewTicker(1000 * time.Millisecond)
@@ -97,42 +108,65 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 		fmt.Printf("\033[1;36m▲ NANGMAN TELEMETRY HUB\033[0m \033[2mv2.0\033[0m                                     \033[1;32m● LIVE\033[0m  \033[2m%s\033[0m\n", now)
 		fmt.Printf("\033[2mEndpoint: \033[0;37m172.16.0.31:8080\033[0m  \033[2m•  Fleet: \033[1;32m%d active\033[0m  \033[2m•  3D Viewer: \033[0;34mhttp://172.16.0.31:8080\033[0m\n\n", len(nodes))
 
-		// 2. 심플 컬럼 헤더
-		fmt.Printf("\033[1;37m%-34s  %-10s  %-16s  %-14s  %-10s  %-26s  %s\033[0m\n",
-			"NAME", "CPU TEMP", "MEMORY", "PSI STALL(10s)", "TCP RETR", "TOP WORKLOAD", "STATUS")
-		fmt.Println("\033[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\033[0m")
+		// 2. 완벽하게 정렬된 컬럼 헤더 (너비: 34, 12, 16, 16, 10, 24, 12 = 총 124자)
+		hName := pad("NAME", 34)
+		hTemp := pad("CPU TEMP", 12)
+		hMem := pad("MEMORY", 16)
+		hPSI := pad("PSI STALL(10s)", 16)
+		hRetr := pad("TCP RETR", 10)
+		hTop := pad("TOP WORKLOAD", 24)
+		hStatus := pad("STATUS", 12)
+
+		fmt.Printf("\033[1;37m%s %s %s %s %s %s %s\033[0m\n", hName, hTemp, hMem, hPSI, hRetr, hTop, hStatus)
+		fmt.Println("\033[2m" + strings.Repeat("─", 128) + "\033[0m")
 
 		if len(nodes) == 0 {
 			fmt.Println("\033[2m  Waiting for nangman-agent telemetry stream on :8080...\033[0m")
 		} else {
 			for _, n := range nodes {
-				// 온도 (간결한 텍스트 + 컬러)
-				tempStr := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
+				// 1. 호스트명
+				rawHost := n.Hostname
+				if utf8.RuneCountInString(rawHost) > 34 {
+					rawHost = string([]rune(rawHost)[:31]) + "..."
+				}
+				colNameVal := pad(rawHost, 34)
+
+				// 2. 온도 (순수 텍스트 패딩 후 색상 입히기)
+				rawTemp := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
+				paddedTemp := pad(rawTemp, 12)
+				var colTempVal string
 				if n.Thermal.CPUTempCelsius >= 80.0 {
-					tempStr = fmt.Sprintf("\033[1;31m%.1f°C\033[0m", n.Thermal.CPUTempCelsius)
+					colTempVal = "\033[1;31m" + paddedTemp + "\033[0m"
 				} else if n.Thermal.CPUTempCelsius >= 70.0 {
-					tempStr = fmt.Sprintf("\033[1;33m%.1f°C\033[0m", n.Thermal.CPUTempCelsius)
+					colTempVal = "\033[1;33m" + paddedTemp + "\033[0m"
 				} else {
-					tempStr = fmt.Sprintf("\033[0;32m%.1f°C\033[0m", n.Thermal.CPUTempCelsius)
+					colTempVal = "\033[0;32m" + paddedTemp + "\033[0m"
 				}
 
-				// 메모리 사용량
-				memUsedGB := n.Memory.UsedMB / 1024.0
-				memStr := fmt.Sprintf("%.1fG (%.1f%%)", memUsedGB, n.Memory.UsagePct)
+				// 3. 메모리
+				rawMem := fmt.Sprintf("%.1fG (%.1f%%)", n.Memory.UsedMB/1024.0, n.Memory.UsagePct)
+				colMemVal := pad(rawMem, 16)
 
-				// PSI 메모리 압박 지수
+				// 4. PSI 메모리 압박
 				psiVal := n.PSI.MemoryAvg10
-				psiStr := fmt.Sprintf("%.2f%%", psiVal)
+				var rawPSI, colPSIVal string
 				if psiVal >= 10.0 {
-					psiStr = fmt.Sprintf("\033[1;31m%.2f%% CRIT\033[0m", psiVal)
+					rawPSI = fmt.Sprintf("%.2f%% CRIT", psiVal)
+					colPSIVal = "\033[1;31m" + pad(rawPSI, 16) + "\033[0m"
 				} else if psiVal >= 5.0 {
-					psiStr = fmt.Sprintf("\033[1;33m%.2f%% WARN\033[0m", psiVal)
+					rawPSI = fmt.Sprintf("%.2f%% WARN", psiVal)
+					colPSIVal = "\033[1;33m" + pad(rawPSI, 16) + "\033[0m"
 				} else {
-					psiStr = fmt.Sprintf("\033[2m%.2f%% ok\033[0m", psiVal)
+					rawPSI = fmt.Sprintf("%.2f%% ok", psiVal)
+					colPSIVal = "\033[2m" + pad(rawPSI, 16) + "\033[0m"
 				}
 
-				// 최다 점유 컨테이너/서비스
-				culpritStr := "\033[2m-\033[0m"
+				// 5. TCP 재전송
+				rawRetr := fmt.Sprintf("%d", n.Network.TCPRetransTotal)
+				colRetrVal := pad(rawRetr, 10)
+
+				// 6. 최다 점유 컨테이너/서비스
+				rawCulprit := "-"
 				if len(n.CgroupsV2) > 0 {
 					topC := n.CgroupsV2[0]
 					for _, c := range n.CgroupsV2 {
@@ -141,36 +175,38 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 						}
 					}
 					shortName := topC.ContainerName
-					if len(shortName) > 17 {
-						shortName = shortName[:14] + "..."
+					if utf8.RuneCountInString(shortName) > 16 {
+						shortName = string([]rune(shortName)[:13]) + "..."
 					}
 					cMemGB := topC.MemoryUsedMB / 1024.0
 					if cMemGB >= 1.0 {
-						culpritStr = fmt.Sprintf("%s (%.1fG)", shortName, cMemGB)
+						rawCulprit = fmt.Sprintf("%s (%.1fG)", shortName, cMemGB)
 					} else {
-						culpritStr = fmt.Sprintf("%s (%.0fM)", shortName, topC.MemoryUsedMB)
+						rawCulprit = fmt.Sprintf("%s (%.0fM)", shortName, topC.MemoryUsedMB)
 					}
 				}
+				colTopVal := pad(rawCulprit, 24)
 
-				// 상태 배지
-				status := "\033[1;32m● HEALTHY\033[0m"
+				// 7. 상태 배지
+				var rawStatus, colStatusVal string
 				if n.Thermal.IsThrottled || psiVal >= 10.0 {
-					status = "\033[1;31m● CRITICAL\033[0m"
+					rawStatus = "● CRITICAL"
+					colStatusVal = "\033[1;31m" + pad(rawStatus, 12) + "\033[0m"
 				} else if psiVal >= 5.0 || n.Thermal.CPUTempCelsius >= 75.0 {
-					status = "\033[1;33m● WARNING\033[0m"
+					rawStatus = "● WARNING"
+					colStatusVal = "\033[1;33m" + pad(rawStatus, 12) + "\033[0m"
+				} else {
+					rawStatus = "● HEALTHY"
+					colStatusVal = "\033[1;32m" + pad(rawStatus, 12) + "\033[0m"
 				}
 
-				hostname := n.Hostname
-				if len(hostname) > 34 {
-					hostname = hostname[:31] + "..."
-				}
-
-				fmt.Printf("%-34s  %-10s  %-16s  %-14s  %-10d  %-26s  %s\n",
-					hostname, tempStr, memStr, psiStr, n.Network.TCPRetransTotal, culpritStr, status)
+				// 1픽셀 오차 없는 칼정렬 출력
+				fmt.Printf("%s %s %s %s %s %s %s\n",
+					colNameVal, colTempVal, colMemVal, colPSIVal, colRetrVal, colTopVal, colStatusVal)
 			}
 		}
 
-		fmt.Println("\033[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\033[0m\n")
+		fmt.Println("\033[2m" + strings.Repeat("─", 128) + "\033[0m\n")
 
 		// 3. 인시던트 스트림 (최근 이벤트만 심플하게)
 		fmt.Println("\033[1;37mRECENT INCIDENTS & RCA ALERTS\033[0m")
