@@ -22,14 +22,14 @@ type IncidentReport struct {
 
 // AnalyzePSI: LLM 없이 0.001초 만에 cgroups v2를 분석하여 범인 컨테이너(Noisy Neighbor)를 특정합니다.
 func AnalyzePSI(payload collector.TelemetryPayload) *IncidentReport {
-	// 임계치: 메모리 PSI full avg10이 5.0% 이상이면 위험(Critical), 2.0% 이상이면 경고(Warning)
+	// 임계치: 메모리 PSI full avg10이 10.0% 이상이면 위험(Critical), 5.0% 이상이면 경고(Warning)
 	psiVal := payload.PSI.MemoryAvg10
-	if psiVal < 2.0 {
-		return nil // 정상 상태
+	if psiVal < 5.0 {
+		return nil // 정상 상태 (5% 미만은 일상적인 커널 버퍼/캐시 회수 수준)
 	}
 
 	severity := "WARNING"
-	if psiVal >= 5.0 {
+	if psiVal >= 10.0 {
 		severity = "CRITICAL"
 	}
 

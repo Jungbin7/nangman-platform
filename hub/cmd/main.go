@@ -4,12 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"nangman-platform/agent/collector"
 	"nangman-platform/hub/metrics"
 	"nangman-platform/hub/rca"
 	"nangman-platform/hub/store"
+)
+
+var (
+	incidentMu      sync.Mutex
+	recentIncidents []string
 )
 
 func main() {
@@ -31,9 +37,14 @@ func main() {
 		// 인메모리 스토어에 갱신
 		clusterStore.UpdateNode(payload)
 
-		// 0.001초 RCA 엔진 실행 (PSI 이상 감지 시 즉시 콘솔 출력)
+		// 0.001초 RCA 엔진 실행 (PSI 이상 감지 시 인시던트 큐에 추가)
 		if report := rca.AnalyzePSI(payload); report != nil {
-			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05.000"), report.Summary)
+			incidentMu.Lock()
+			recentIncidents = append([]string{fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), report.Summary)}, recentIncidents...)
+			if len(recentIncidents) > 6 {
+				recentIncidents = recentIncidents[:6]
+			}
+			incidentMu.Unlock()
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -61,16 +72,116 @@ func main() {
 		w.Write([]byte(get3DDashboardHTML()))
 	})
 
-	port := ":8080"
-	fmt.Println("==================================================================")
-	fmt.Printf("🧠 Nangman-Hub v1.0 Server listening on %s\n", port)
-	fmt.Println("📡 Ingest endpoint : POST /api/v1/telemetry")
-	fmt.Println("🌐 Query endpoint  : GET  /api/v1/nodes")
-	fmt.Println("📊 Prometheus API  : GET  /metrics")
-	fmt.Println("==================================================================")
+	// 5. 모던 ANSI TUI 대시보드 백그라운드 렌더러 (1초마다 터미널 고정 화면 리프레시)
+	go renderTUIDashboard(clusterStore)
 
+	port := ":8080"
 	if err := http.ListenAndServe(port, nil); err != nil {
 		fmt.Printf("❌ Hub server error: %v\n", err)
+	}
+}
+
+// renderTUIDashboard: k9s / htop 스타일의 사이버펑크 터미널 관제 대시보드
+func renderTUIDashboard(clusterStore *store.ClusterStore) {
+	ticker := time.NewTicker(1000 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		nodes := clusterStore.GetAllNodes()
+		now := time.Now().Format("15:04:05")
+
+		// ANSI Clear Screen & Cursor to Home
+		fmt.Print("\033[H\033[2J")
+
+		// 1. 헤더 배너
+		fmt.Println("\033[1;36m╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗\033[0m")
+		fmt.Printf("\033[1;36m║\033[0m \033[1;37m🌌 NANGMAN HYBRID CLUSTER TELEMETRY HUB v2.0\033[0m \033[2m(Production Telemetry)\033[0m                   \033[1;32m● LIVE\033[0m  \033[1;33m%s\033[0m \033[1;36m║\033[0m\n", now)
+		fmt.Printf("\033[1;36m║\033[0m \033[2mHub Ingest:\033[0m \033[1m172.16.0.31:8080\033[0m  │ \033[2mActive Telemetry Nodes:\033[0m \033[1;32m%d Online\033[0m  │ \033[2m3D Spatial Viewer:\033[0m \033[1;35mhttp://localhost:8080\033[0m   \033[1;36m║\033[0m\n", len(nodes))
+		fmt.Println("\033[1;36m╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝\033[0m")
+
+		// 2. 노드 텔레메트리 테이블 헤더
+		fmt.Println("\033[1m┌──────────────────────────────────┬──────────┬──────────────────┬──────────────┬────────────┬─────────────────────────────┬──────────┐\033[0m")
+		fmt.Println("\033[1m│ NODE HOSTNAME                    │ CPU TEMP │ RAM USAGE        │ PSI MEM(10s) │ TCP RETR   │ TOP CULPRIT (cgroups v2)    │ HEALTH   │\033[0m")
+		fmt.Println("\033[1m├──────────────────────────────────┼──────────┼──────────────────┼──────────────┼────────────┼─────────────────────────────┼──────────┤\033[0m")
+
+		if len(nodes) == 0 {
+			fmt.Println("│ \033[2m(No nodes connected. Waiting for nangman-agent telemetry stream on :8080...)\033[0m                                             │")
+		} else {
+			for _, n := range nodes {
+				// 온도 색상
+				tempStr := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
+				if n.Thermal.CPUTempCelsius >= 80.0 {
+					tempStr = fmt.Sprintf("\033[1;31m%6.1f°C\033[0m", n.Thermal.CPUTempCelsius)
+				} else if n.Thermal.CPUTempCelsius >= 70.0 {
+					tempStr = fmt.Sprintf("\033[1;33m%6.1f°C\033[0m", n.Thermal.CPUTempCelsius)
+				} else {
+					tempStr = fmt.Sprintf("\033[1;32m%6.1f°C\033[0m", n.Thermal.CPUTempCelsius)
+				}
+
+				// 메모리 사용량
+				memStr := fmt.Sprintf("%.0fMB (%.1f%%)", n.Memory.UsedMB, n.Memory.UsagePct)
+
+				// PSI 메모리 색상
+				psiVal := n.PSI.MemoryAvg10
+				psiStr := fmt.Sprintf("%.2f%%", psiVal)
+				if psiVal >= 10.0 {
+					psiStr = fmt.Sprintf("\033[1;31m%6.2f%% CRIT\033[0m", psiVal)
+				} else if psiVal >= 5.0 {
+					psiStr = fmt.Sprintf("\033[1;33m%6.2f%% WARN\033[0m", psiVal)
+				} else {
+					psiStr = fmt.Sprintf("\033[1;32m%6.2f%% NORM\033[0m", psiVal)
+				}
+
+				// 1위 점유 cgroup
+				culpritStr := "-"
+				if len(n.CgroupsV2) > 0 {
+					topC := n.CgroupsV2[0]
+					for _, c := range n.CgroupsV2 {
+						if c.MemoryUsedMB > topC.MemoryUsedMB {
+							topC = c
+						}
+					}
+					shortName := topC.ContainerName
+					if len(shortName) > 16 {
+						shortName = shortName[:13] + "..."
+					}
+					culpritStr = fmt.Sprintf("%s (%.0fMB)", shortName, topC.MemoryUsedMB)
+				}
+
+				// 상태 배지
+				status := "\033[1;32m🟢 NORMAL\033[0m"
+				if n.Thermal.IsThrottled || psiVal >= 10.0 {
+					status = "\033[1;31m🔴 CRIT  \033[0m"
+				} else if psiVal >= 5.0 || n.Thermal.CPUTempCelsius >= 75.0 {
+					status = "\033[1;33m🟡 WARN  \033[0m"
+				}
+
+				hostname := n.Hostname
+				if len(hostname) > 32 {
+					hostname = hostname[:29] + "..."
+				}
+
+				fmt.Printf("│ %-32s │ %s   │ %-16s │ %s │ %-10d │ %-27s │ %s │\n",
+					hostname, tempStr, memStr, psiStr, n.Network.TCPRetransTotal, culpritStr, status)
+			}
+		}
+
+		fmt.Println("\033[1m└──────────────────────────────────┴──────────┴──────────────────┴──────────────┴────────────┴─────────────────────────────┴──────────┘\033[0m")
+
+		// 3. 실시간 인시던트 및 RCA 감사 로그 (최근 6건)
+		fmt.Println("\033[1;33m📋 REAL-TIME INCIDENT & RCA AUDIT LOG (Kernel Bottleneck Detection)\033[0m")
+		fmt.Println("\033[2m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\033[0m")
+		incidentMu.Lock()
+		if len(recentIncidents) == 0 {
+			fmt.Println(" \033[2m• No active kernel pressure incidents detected. Cluster PSI is running smoothly.\033[0m")
+		} else {
+			for _, inc := range recentIncidents {
+				fmt.Printf(" • %s\n", inc)
+			}
+		}
+		incidentMu.Unlock()
+		fmt.Println("\033[2m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\033[0m")
+		fmt.Printf("\033[2m[Tip] Open 3D Spatial Viewer at \033[1;35mhttp://172.16.0.31:8080\033[0m \033[2m| Press Ctrl+C to terminate Hub\033[0m\n")
 	}
 }
 
