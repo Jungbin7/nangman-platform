@@ -220,34 +220,53 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 					rawHost = string([]rune(rawHost)[:27]) + "..."
 				}
 
-				tempStr := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
+				// 1. 호스트명 (30칸)
+				colHost := pad(rawHost, 30)
+
+				// 2. 온도 (10칸: 순수 텍스트 먼저 10칸 패딩 후 색상 입히기)
+				rawTemp := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
+				paddedTemp := pad(rawTemp, 10)
+				var colTemp string
 				if n.Thermal.CPUTempCelsius >= 75.0 {
-					tempStr = "\033[1;31m" + tempStr + "\033[0m"
+					colTemp = "\033[1;31m" + paddedTemp + "\033[0m"
 				} else {
-					tempStr = "\033[1;32m" + tempStr + "\033[0m"
+					colTemp = "\033[1;32m" + paddedTemp + "\033[0m"
 				}
 
-				memStr := fmt.Sprintf("%.1fG (%.0f%%)", n.Memory.UsedMB/1024.0, n.Memory.UsagePct)
+				// 3. 메모리 (14칸)
+				rawMem := fmt.Sprintf("%.1fG (%.0f%%)", n.Memory.UsedMB/1024.0, n.Memory.UsagePct)
+				colMem := pad(rawMem, 14)
 
+				// 4. PSI (12칸: 순수 텍스트 먼저 12칸 패딩 후 색상 입히기)
 				psiVal := n.PSI.MemoryAvg10
-				var psiStr string
+				var rawPSI, colPSI string
 				if psiVal >= 10.0 {
-					psiStr = fmt.Sprintf("\033[1;31m%.2f%% CRIT\033[0m", psiVal)
+					rawPSI = fmt.Sprintf("%.2f%% CRIT", psiVal)
+					colPSI = "\033[1;31m" + pad(rawPSI, 12) + "\033[0m"
 				} else if psiVal >= 5.0 {
-					psiStr = fmt.Sprintf("\033[1;33m%.2f%% WARN\033[0m", psiVal)
+					rawPSI = fmt.Sprintf("%.2f%% WARN", psiVal)
+					colPSI = "\033[1;33m" + pad(rawPSI, 12) + "\033[0m"
 				} else {
-					psiStr = fmt.Sprintf("\033[2m%.2f%% ok\033[0m", psiVal)
+					rawPSI = fmt.Sprintf("%.2f%% ok", psiVal)
+					colPSI = "\033[2m" + pad(rawPSI, 12) + "\033[0m"
 				}
 
-				status := "\033[1;32m● HEALTHY\033[0m"
+				// 5. 상태 (10칸: 순수 텍스트 먼저 10칸 패딩 후 색상 입히기)
+				var rawStatus, colStatus string
 				if n.Thermal.IsThrottled || psiVal >= 10.0 {
-					status = "\033[1;31m● CRITICAL\033[0m"
+					rawStatus = "● CRITICAL"
+					colStatus = "\033[1;31m" + pad(rawStatus, 10) + "\033[0m"
 				} else if psiVal >= 5.0 || n.Thermal.CPUTempCelsius >= 70.0 {
-					status = "\033[1;33m● WARNING\033[0m"
+					rawStatus = "● WARNING"
+					colStatus = "\033[1;33m" + pad(rawStatus, 10) + "\033[0m"
+				} else {
+					rawStatus = "● HEALTHY"
+					colStatus = "\033[1;32m" + pad(rawStatus, 10) + "\033[0m"
 				}
 
-				fmt.Printf("  %-30s  %-10s  %-14s  %-12s  %s\033[K\n",
-					pad(rawHost, 30), tempStr, pad(memStr, 14), pad(psiStr, 12), status)
+				// 1픽셀 오차 없는 수직 칼정렬 출력
+				fmt.Printf("  %s  %s  %s  %s  %s\033[K\n",
+					colHost, colTemp, colMem, colPSI, colStatus)
 				printed++
 			}
 			if printed == 1 {
