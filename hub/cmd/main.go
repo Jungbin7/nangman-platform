@@ -51,10 +51,16 @@ func main() {
 		// 인메모리 스토어에 갱신
 		clusterStore.UpdateNode(payload)
 
-		// 0.001초 RCA 엔진 실행 (PSI 이상 감지 시 인시던트 큐에 추가)
-		if report := rca.AnalyzePSI(payload); report != nil {
+		// 0.001초 종합 RCA 엔진 실행 (발열, OOM, PSI, 저전압 전수 검사)
+		reports := rca.AnalyzeComprehensive(payload)
+		if len(reports) > 0 {
 			incidentMu.Lock()
-			recentIncidents = append([]string{fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), report.Summary)}, recentIncidents...)
+			for _, rep := range reports {
+				// 중복 로그 방지 (동일 요약이 이미 최근 1번에 있으면 건너뜀)
+				if len(recentIncidents) == 0 || !strings.Contains(recentIncidents[0], rep.Summary) {
+					recentIncidents = append([]string{fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), rep.Summary)}, recentIncidents...)
+				}
+			}
 			if len(recentIncidents) > 3 {
 				recentIncidents = recentIncidents[:3]
 			}
@@ -154,9 +160,9 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 			len(nodes), healthyCount, len(nodes), avgTemp, maxPSI)
 		fmt.Println("\033[2m──────────────────────────────────────────────────────────────────────────────────────\033[0m\033[K")
 
-		// 2. 구역별 집계 게이지 (4줄)
+		// 2. 구역별 집계 게이지 (4줄: 대괄호 [ 위치를 14번째 열로 100% 수직 칼정렬)
 		fmt.Println("\033[1;37mFLEET ZONE GAUGES\033[0m\033[K")
-		// 석촌 SBC 팜
+		// 석촌 IDC
 		seokchonNodes := 0
 		for _, n := range nodes {
 			if strings.Contains(n.Hostname, "seokchon") || strings.Contains(n.Hostname, "pi5") || strings.Contains(n.Hostname, "raspix") {
@@ -167,12 +173,9 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 		if seokchonNodes > 0 {
 			scStatus = fmt.Sprintf("\033[1;32m%d Online\033[0m \033[2m(100%% OK)\033[0m", seokchonNodes)
 		}
-		fmt.Printf("  %-18s [%s] %s\033[K\n", "석촌 엣지 SBC", "\033[1;32m"+drawBar(1.0, 20)+"\033[0m", scStatus)
-
-		// 연구실 IDC
-		fmt.Printf("  %-18s [%s] \033[2mReady\033[0m\033[K\n", "Wisoft 연구실 IDC", "\033[2m"+drawBar(0.0, 20)+"\033[0m")
-		// AWS VPC
-		fmt.Printf("  %-18s [%s] \033[2mReady\033[0m\033[K\n", "AWS Cloud VPC", "\033[2m"+drawBar(0.0, 20)+"\033[0m")
+		fmt.Printf("  석촌 IDC    [%s] %s\033[K\n", "\033[1;32m"+drawBar(1.0, 20)+"\033[0m", scStatus)
+		fmt.Printf("  연구실 IDC  [%s] \033[2mReady\033[0m\033[K\n", "\033[2m"+drawBar(0.0, 20)+"\033[0m")
+		fmt.Printf("  AWS Cloud   [%s] \033[2mReady\033[0m\033[K\n", "\033[2m"+drawBar(0.0, 20)+"\033[0m")
 
 		// 3. 100-Node Dense Micro-Dot Heatmap (3줄)
 		fmt.Println("\n\033[1;37m100-NODE DENSE HEATMAP\033[0m \033[2m(1 dot = 1 node, Real-time status)\033[0m\033[K")
