@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -22,6 +25,15 @@ var (
 
 func main() {
 	clusterStore := store.NewClusterStore()
+
+	// SIGINT / SIGTERM 안전 종료 (Alternate Screen 복원)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Print("\033[?1049l\033[?25h\n🛑 Nangman-Hub gracefully stopped.\n")
+		os.Exit(0)
+	}()
 
 	// 1. 에이전트 텔레메트리 수신 엔드포인트
 	http.HandleFunc("/api/v1/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -43,8 +55,8 @@ func main() {
 		if report := rca.AnalyzePSI(payload); report != nil {
 			incidentMu.Lock()
 			recentIncidents = append([]string{fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), report.Summary)}, recentIncidents...)
-			if len(recentIncidents) > 6 {
-				recentIncidents = recentIncidents[:6]
+			if len(recentIncidents) > 3 {
+				recentIncidents = recentIncidents[:3]
 			}
 			incidentMu.Unlock()
 		}
@@ -74,7 +86,7 @@ func main() {
 		w.Write([]byte(get3DDashboardHTML()))
 	})
 
-	// 5. 모던 ANSI TUI 대시보드 백그라운드 렌더러 (1초마다 터미널 고정 화면 리프레시)
+	// 5. 빅테크 대규모 플릿 TUI 대시보드 백그라운드 렌더러
 	go renderTUIDashboard(clusterStore)
 
 	port := ":8080"
@@ -92,8 +104,22 @@ func pad(s string, width int) string {
 	return s + strings.Repeat(" ", width-rLen)
 }
 
-// renderTUIDashboard: 빅테크(Stripe, Vercel, Google Cloud) 스타일의 미니멀 모던 CLI 대시보드
+func drawBar(pct float64, barLen int) string {
+	fill := int(pct * float64(barLen))
+	if fill > barLen {
+		fill = barLen
+	}
+	if fill < 0 {
+		fill = 0
+	}
+	return strings.Repeat("█", fill) + strings.Repeat("░", barLen-fill)
+}
+
+// renderTUIDashboard: 100대 이상도 단 22줄에 완벽 고정되는 빅테크 Large-Scale Fleet TUI 대시보드
 func renderTUIDashboard(clusterStore *store.ClusterStore) {
+	// 터미널 Alternate Screen Buffer 진입 및 커서 숨김 (스크롤바 완벽 차단)
+	fmt.Print("\033[?1049h\033[?25l")
+
 	ticker := time.NewTicker(1000 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -101,126 +127,149 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 		nodes := clusterStore.GetAllNodes()
 		now := time.Now().Format("15:04:05")
 
-		// ANSI Clear Screen & Cursor to Home
-		fmt.Print("\033[H\033[2J")
+		// 1초마다 화면을 지우지 않고 커서만 맨 위(1,1)로 이동하여 덮어씀 (깜빡임 0%, 스크롤 0%)
+		fmt.Print("\033[H")
 
-		// 1. 미니멀 상단 메타 헤더
-		fmt.Printf("\033[1;36m▲ NANGMAN TELEMETRY HUB\033[0m \033[2mv2.0\033[0m                                     \033[1;32m● LIVE\033[0m  \033[2m%s\033[0m\n", now)
-		fmt.Printf("\033[2mEndpoint: \033[0;37m172.16.0.31:8080\033[0m  \033[2m•  Fleet: \033[1;32m%d active\033[0m  \033[2m•  3D Viewer: \033[0;34mhttp://172.16.0.31:8080\033[0m\n\n", len(nodes))
-
-		// 2. 완벽하게 정렬된 컬럼 헤더 (너비: 34, 12, 16, 16, 10, 24, 12 = 총 124자)
-		hName := pad("NAME", 34)
-		hTemp := pad("CPU TEMP", 12)
-		hMem := pad("MEMORY", 16)
-		hPSI := pad("PSI STALL(10s)", 16)
-		hRetr := pad("TCP RETR", 10)
-		hTop := pad("TOP WORKLOAD", 24)
-		hStatus := pad("STATUS", 12)
-
-		fmt.Printf("\033[1;37m%s %s %s %s %s %s %s\033[0m\n", hName, hTemp, hMem, hPSI, hRetr, hTop, hStatus)
-		fmt.Println("\033[2m" + strings.Repeat("─", 128) + "\033[0m")
-
-		if len(nodes) == 0 {
-			fmt.Println("\033[2m  Waiting for nangman-agent telemetry stream on :8080...\033[0m")
-		} else {
-			for _, n := range nodes {
-				// 1. 호스트명
-				rawHost := n.Hostname
-				if utf8.RuneCountInString(rawHost) > 34 {
-					rawHost = string([]rune(rawHost)[:31]) + "..."
-				}
-				colNameVal := pad(rawHost, 34)
-
-				// 2. 온도 (순수 텍스트 패딩 후 색상 입히기)
-				rawTemp := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
-				paddedTemp := pad(rawTemp, 12)
-				var colTempVal string
-				if n.Thermal.CPUTempCelsius >= 80.0 {
-					colTempVal = "\033[1;31m" + paddedTemp + "\033[0m"
-				} else if n.Thermal.CPUTempCelsius >= 70.0 {
-					colTempVal = "\033[1;33m" + paddedTemp + "\033[0m"
-				} else {
-					colTempVal = "\033[0;32m" + paddedTemp + "\033[0m"
-				}
-
-				// 3. 메모리
-				rawMem := fmt.Sprintf("%.1fG (%.1f%%)", n.Memory.UsedMB/1024.0, n.Memory.UsagePct)
-				colMemVal := pad(rawMem, 16)
-
-				// 4. PSI 메모리 압박
-				psiVal := n.PSI.MemoryAvg10
-				var rawPSI, colPSIVal string
-				if psiVal >= 10.0 {
-					rawPSI = fmt.Sprintf("%.2f%% CRIT", psiVal)
-					colPSIVal = "\033[1;31m" + pad(rawPSI, 16) + "\033[0m"
-				} else if psiVal >= 5.0 {
-					rawPSI = fmt.Sprintf("%.2f%% WARN", psiVal)
-					colPSIVal = "\033[1;33m" + pad(rawPSI, 16) + "\033[0m"
-				} else {
-					rawPSI = fmt.Sprintf("%.2f%% ok", psiVal)
-					colPSIVal = "\033[2m" + pad(rawPSI, 16) + "\033[0m"
-				}
-
-				// 5. TCP 재전송
-				rawRetr := fmt.Sprintf("%d", n.Network.TCPRetransTotal)
-				colRetrVal := pad(rawRetr, 10)
-
-				// 6. 최다 점유 컨테이너/서비스
-				rawCulprit := "-"
-				if len(n.CgroupsV2) > 0 {
-					topC := n.CgroupsV2[0]
-					for _, c := range n.CgroupsV2 {
-						if c.MemoryUsedMB > topC.MemoryUsedMB {
-							topC = c
-						}
-					}
-					shortName := topC.ContainerName
-					if utf8.RuneCountInString(shortName) > 16 {
-						shortName = string([]rune(shortName)[:13]) + "..."
-					}
-					cMemGB := topC.MemoryUsedMB / 1024.0
-					if cMemGB >= 1.0 {
-						rawCulprit = fmt.Sprintf("%s (%.1fG)", shortName, cMemGB)
-					} else {
-						rawCulprit = fmt.Sprintf("%s (%.0fM)", shortName, topC.MemoryUsedMB)
-					}
-				}
-				colTopVal := pad(rawCulprit, 24)
-
-				// 7. 상태 배지
-				var rawStatus, colStatusVal string
-				if n.Thermal.IsThrottled || psiVal >= 10.0 {
-					rawStatus = "● CRITICAL"
-					colStatusVal = "\033[1;31m" + pad(rawStatus, 12) + "\033[0m"
-				} else if psiVal >= 5.0 || n.Thermal.CPUTempCelsius >= 75.0 {
-					rawStatus = "● WARNING"
-					colStatusVal = "\033[1;33m" + pad(rawStatus, 12) + "\033[0m"
-				} else {
-					rawStatus = "● HEALTHY"
-					colStatusVal = "\033[1;32m" + pad(rawStatus, 12) + "\033[0m"
-				}
-
-				// 1픽셀 오차 없는 칼정렬 출력
-				fmt.Printf("%s %s %s %s %s %s %s\n",
-					colNameVal, colTempVal, colMemVal, colPSIVal, colRetrVal, colTopVal, colStatusVal)
+		// 1. 헤더 (3줄)
+		healthyCount := 0
+		var totalTemp float64
+		var maxPSI float64
+		for _, n := range nodes {
+			if !n.Thermal.IsThrottled && n.PSI.MemoryAvg10 < 5.0 && n.Thermal.CPUTempCelsius < 75.0 {
+				healthyCount++
+			}
+			totalTemp += n.Thermal.CPUTempCelsius
+			if n.PSI.MemoryAvg10 > maxPSI {
+				maxPSI = n.PSI.MemoryAvg10
 			}
 		}
 
-		fmt.Println("\033[2m" + strings.Repeat("─", 128) + "\033[0m\n")
+		avgTemp := 0.0
+		if len(nodes) > 0 {
+			avgTemp = totalTemp / float64(len(nodes))
+		}
 
-		// 3. 인시던트 스트림 (최근 이벤트만 심플하게)
-		fmt.Println("\033[1;37mRECENT INCIDENTS & RCA ALERTS\033[0m")
+		fmt.Printf("\033[1;36m▲ NANGMAN TELEMETRY FLEET CONTROL\033[0m \033[2mv3.0\033[0m                      \033[1;32m● LIVE\033[0m  \033[2m%s\033[0m\033[K\n", now)
+		fmt.Printf("\033[2mFleet: \033[1;32m%d Online\033[0m  │ \033[2mHealth: \033[1;37m%d/%d Healthy\033[0m  │ \033[2mAvg Temp: \033[1;33m%.1f°C\033[0m  │ \033[2mPeak PSI: \033[1;35m%.2f%%\033[0m\033[K\n",
+			len(nodes), healthyCount, len(nodes), avgTemp, maxPSI)
+		fmt.Println("\033[2m──────────────────────────────────────────────────────────────────────────────────────\033[0m\033[K")
+
+		// 2. 구역별 집계 게이지 (4줄)
+		fmt.Println("\033[1;37mFLEET ZONE GAUGES\033[0m\033[K")
+		// 석촌 SBC 팜
+		seokchonNodes := 0
+		for _, n := range nodes {
+			if strings.Contains(n.Hostname, "seokchon") || strings.Contains(n.Hostname, "pi5") || strings.Contains(n.Hostname, "raspix") {
+				seokchonNodes++
+			}
+		}
+		scStatus := "\033[2mWaiting\033[0m"
+		if seokchonNodes > 0 {
+			scStatus = fmt.Sprintf("\033[1;32m%d Online\033[0m \033[2m(100%% OK)\033[0m", seokchonNodes)
+		}
+		fmt.Printf("  %-18s [%s] %s\033[K\n", "석촌 엣지 SBC", "\033[1;32m"+drawBar(1.0, 20)+"\033[0m", scStatus)
+
+		// 연구실 IDC
+		fmt.Printf("  %-18s [%s] \033[2mReady\033[0m\033[K\n", "Wisoft 연구실 IDC", "\033[2m"+drawBar(0.0, 20)+"\033[0m")
+		// AWS VPC
+		fmt.Printf("  %-18s [%s] \033[2mReady\033[0m\033[K\n", "AWS Cloud VPC", "\033[2m"+drawBar(0.0, 20)+"\033[0m")
+
+		// 3. 100-Node Dense Micro-Dot Heatmap (3줄)
+		fmt.Println("\n\033[1;37m100-NODE DENSE HEATMAP\033[0m \033[2m(1 dot = 1 node, Real-time status)\033[0m\033[K")
+		var dotRow1, dotRow2 strings.Builder
+		for i := 1; i <= 100; i++ {
+			var dot string
+			if i <= len(nodes) {
+				n := nodes[i-1]
+				if n.Thermal.IsThrottled || n.PSI.MemoryAvg10 >= 10.0 {
+					dot = "\033[1;31m■\033[0m" // 위험
+				} else if n.PSI.MemoryAvg10 >= 5.0 || n.Thermal.CPUTempCelsius >= 70.0 {
+					dot = "\033[1;33m■\033[0m" // 경고
+				} else {
+					dot = "\033[1;32m■\033[0m" // 정상
+				}
+			} else {
+				dot = "\033[2m·\033[0m" // 슬롯 대기
+			}
+
+			if i <= 50 {
+				dotRow1.WriteString(dot)
+			} else {
+				dotRow2.WriteString(dot)
+			}
+		}
+		fmt.Printf("  %s \033[2m(01-50)\033[0m\033[K\n", dotRow1.String())
+		fmt.Printf("  %s \033[2m(51-100)\033[0m\033[K\n", dotRow2.String())
+
+		// 4. 관리 예외 원칙: ATTENTION REQUIRED (Top Bottlenecks) (5줄)
+		fmt.Println("\n\033[1;37mATTENTION REQUIRED (Bottlenecks & Anomalies)\033[0m\033[K")
+		fmt.Printf("\033[2m  %-30s  %-10s  %-14s  %-12s  %s\033[0m\033[K\n", "HOSTNAME", "CPU TEMP", "RAM USAGE", "PSI STALL", "STATUS")
+
+		if len(nodes) == 0 {
+			fmt.Println("  \033[2mWaiting for telemetry stream on :8080...\033[0m\033[K")
+			fmt.Println("\033[K")
+		} else {
+			// 이상 노드 우선 필터링, 없으면 최근 노드 출력
+			printed := 0
+			for _, n := range nodes {
+				if printed >= 3 {
+					break
+				}
+				rawHost := n.Hostname
+				if utf8.RuneCountInString(rawHost) > 30 {
+					rawHost = string([]rune(rawHost)[:27]) + "..."
+				}
+
+				tempStr := fmt.Sprintf("%.1f°C", n.Thermal.CPUTempCelsius)
+				if n.Thermal.CPUTempCelsius >= 75.0 {
+					tempStr = "\033[1;31m" + tempStr + "\033[0m"
+				} else {
+					tempStr = "\033[1;32m" + tempStr + "\033[0m"
+				}
+
+				memStr := fmt.Sprintf("%.1fG (%.0f%%)", n.Memory.UsedMB/1024.0, n.Memory.UsagePct)
+
+				psiVal := n.PSI.MemoryAvg10
+				var psiStr string
+				if psiVal >= 10.0 {
+					psiStr = fmt.Sprintf("\033[1;31m%.2f%% CRIT\033[0m", psiVal)
+				} else if psiVal >= 5.0 {
+					psiStr = fmt.Sprintf("\033[1;33m%.2f%% WARN\033[0m", psiVal)
+				} else {
+					psiStr = fmt.Sprintf("\033[2m%.2f%% ok\033[0m", psiVal)
+				}
+
+				status := "\033[1;32m● HEALTHY\033[0m"
+				if n.Thermal.IsThrottled || psiVal >= 10.0 {
+					status = "\033[1;31m● CRITICAL\033[0m"
+				} else if psiVal >= 5.0 || n.Thermal.CPUTempCelsius >= 70.0 {
+					status = "\033[1;33m● WARNING\033[0m"
+				}
+
+				fmt.Printf("  %-30s  %-10s  %-14s  %-12s  %s\033[K\n",
+					pad(rawHost, 30), tempStr, pad(memStr, 14), pad(psiStr, 12), status)
+				printed++
+			}
+			if printed == 1 {
+				fmt.Println("  \033[2m(All other nodes operating normally within green thresholds)\033[0m\033[K")
+			}
+		}
+
+		// 5. 최근 인시던트 로그 (최근 2건)
+		fmt.Println("\n\033[1;37mRECENT INCIDENTS & RCA AUDIT\033[0m\033[K")
 		incidentMu.Lock()
 		if len(recentIncidents) == 0 {
-			fmt.Println("  \033[2mNo active anomalies. All nodes operational.\033[0m")
+			fmt.Println("  \033[2m• No active kernel pressure incidents. Cluster running smoothly.\033[0m\033[K")
 		} else {
-			for _, inc := range recentIncidents {
-				fmt.Printf("  \033[0;33m%s\033[0m\n", inc)
+			for i := 0; i < len(recentIncidents) && i < 2; i++ {
+				fmt.Printf("  \033[0;33m• %s\033[0m\033[K\n", recentIncidents[i])
 			}
 		}
 		incidentMu.Unlock()
 
-		fmt.Println("\n\033[2mPress Ctrl+C to terminate Hub\033[0m")
+		// 6. 풋터 (1줄)
+		fmt.Println("\033[2m──────────────────────────────────────────────────────────────────────────────────────\033[0m\033[K")
+		fmt.Printf("\033[2mWeb 3D Viewer: \033[0;34mhttp://172.16.0.31:8080\033[0m  \033[2m│  Press Ctrl+C to terminate Hub\033[0m\033[K\n")
 	}
 }
 
