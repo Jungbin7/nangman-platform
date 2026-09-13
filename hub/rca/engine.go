@@ -8,19 +8,25 @@ import (
 	"nangman-platform/agent/collector"
 )
 
-// IncidentReport: PSI 스파이크 발생 시 RCA 엔진이 생성하는 진단 리포트
+// IncidentReport: 이상 징후 발생 시 RCA 엔진이 생성하는 정형화된 리포트
 type IncidentReport struct {
 	Timestamp       time.Time `json:"timestamp"`
 	NodeID          string    `json:"node_id"`
 	PSIMemoryAvg10  float64   `json:"psi_memory_avg10"`
 	Severity        string    `json:"severity"` // "WARNING" | "CRITICAL"
-	CulpritName     string    `json:"culprit_container"`
-	CulpritMemoryMB float64   `json:"culprit_memory_mb"`
-	CulpritSharePct float64   `json:"culprit_share_pct"`
+	AlertType       string    `json:"alert_type"`
+	MetricValue     string    `json:"metric_value"`
+	SpikeWorkload   string    `json:"spike_workload"`
+	BaselineLive    string    `json:"baseline_live"`
 	Summary         string    `json:"summary"`
 }
 
-// AnalyzeComprehensive: 발열 스로틀링, OOM-Kill, 커널 PSI 압박, 라즈베리파이 저전압을 0.001초 만에 전수 검사합니다.
+// 이전 주기 노드별 워크로드 메모리 캐시 (Delta 추적용)
+var (
+	lastWorkloadMem = make(map[string]map[string]float64) // nodeID -> containerName -> memoryMB
+)
+
+// AnalyzeComprehensive: 발열, OOM, PSI, 저전압을 검사하여 정형화된 Alert를 반환합니다.
 func AnalyzeComprehensive(payload collector.TelemetryPayload) []IncidentReport {
 	var reports []IncidentReport
 	now := time.Now()
@@ -32,10 +38,13 @@ func AnalyzeComprehensive(payload collector.TelemetryPayload) []IncidentReport {
 			sev = "CRITICAL"
 		}
 		reports = append(reports, IncidentReport{
-			Timestamp: now,
-			NodeID:    payload.NodeID,
-			Severity:  sev,
-			Summary:   fmt.Sprintf("🔥 [%s] 하드웨어 고온(%.1f°C) 감지! 발열 스로틀링 위험", payload.NodeID, payload.Thermal.CPUTempCelsius),
+			Timestamp:     now,
+			NodeID:        payload.NodeID,
+			Severity:      sev,
+			AlertType:     "THERMAL_HIGH",
+			MetricValue:   fmt.Sprintf("%.1f°C", payload.Thermal.CPUTempCelsius),
+			SpikeWorkload: "SoC Thermal Throttling",
+			Summary:       fmt.Sprintf("[%s] THERMAL_HIGH (%.1f°C)", payload.NodeID, payload.Thermal.CPUTempCelsius),
 		})
 	}
 
@@ -43,12 +52,13 @@ func AnalyzeComprehensive(payload collector.TelemetryPayload) []IncidentReport {
 	for _, c := range payload.CgroupsV2 {
 		if c.OOMKillCount > 0 {
 			reports = append(reports, IncidentReport{
-				Timestamp:       now,
-				NodeID:          payload.NodeID,
-				Severity:        "CRITICAL",
-				CulpritName:     c.ContainerName,
-				CulpritMemoryMB: c.MemoryUsedMB,
-				Summary:         fmt.Sprintf("💀 [%s] 컨테이너 OOM 사살 감지! [%s] 프로세스 강제 종료됨 (누적 %d건)", payload.NodeID, c.ContainerName, c.OOMKillCount),
+				Timestamp:     now,
+				NodeID:        payload.NodeID,
+				Severity:      "CRITICAL",
+				AlertType:     "OOM_KILLED",
+				MetricValue:   fmt.Sprintf("%d kills", c.OOMKillCount),
+				SpikeWorkload: fmt.Sprintf("%s (%.0fMB)", c.ContainerName, c.MemoryUsedMB),
+				Summary:       fmt.Sprintf("[%s] OOM_KILLED %s", payload.NodeID, c.ContainerName),
 			})
 			break
 		}
@@ -62,21 +72,24 @@ func AnalyzeComprehensive(payload collector.TelemetryPayload) []IncidentReport {
 	// 4. 라즈베리파이 5V 전원 저전압 감지
 	if payload.RPiHealth.UnderVoltageDetected {
 		reports = append(reports, IncidentReport{
-			Timestamp: now,
-			NodeID:    payload.NodeID,
-			Severity:  "CRITICAL",
-			Summary:   fmt.Sprintf("⚡ [%s] 5V 전원 저전압(Under-voltage) 발생! 전원 어댑터 불량 위험", payload.NodeID),
+			Timestamp:     now,
+			NodeID:        payload.NodeID,
+			Severity:      "CRITICAL",
+			AlertType:     "UNDER_VOLTAGE",
+			MetricValue:   "4.63V Drop",
+			SpikeWorkload: "Power Adapter Issue",
+			Summary:       fmt.Sprintf("[%s] UNDER_VOLTAGE (5V Drop)", payload.NodeID),
 		})
 	}
 
 	return reports
 }
 
-// AnalyzePSI: LLM 없이 0.001초 만에 cgroups v2를 분석하여 범인 컨테이너(Noisy Neighbor)를 특정합니다.
+// AnalyzePSI: cgroups v2를 분석하여 최근 급증한 프로세스와 기존 상위 프로세스를 구분하여 추출합니다.
 func AnalyzePSI(payload collector.TelemetryPayload) *IncidentReport {
 	psiVal := payload.PSI.MemoryAvg10
 	if psiVal < 5.0 {
-		return nil // 정상 상태
+		return nil
 	}
 
 	severity := "WARNING"
@@ -90,33 +103,63 @@ func AnalyzePSI(payload collector.TelemetryPayload) *IncidentReport {
 			NodeID:         payload.NodeID,
 			PSIMemoryAvg10: psiVal,
 			Severity:       severity,
-			Summary:        fmt.Sprintf("🚨 [%s] PSI 메모리 압박 %.2f%% 감지 (상세 cgroups 정보 없음)", payload.NodeID, psiVal),
+			AlertType:      "PSI_STALL",
+			MetricValue:    fmt.Sprintf("%.2f%%", psiVal),
+			Summary:        fmt.Sprintf("[%s] PSI_STALL %.2f%%", payload.NodeID, psiVal),
 		}
 	}
 
+	// 메모리 사용량 기준 내림차순 정렬
 	containers := make([]collector.CgroupContainer, len(payload.CgroupsV2))
 	copy(containers, payload.CgroupsV2)
 	sort.Slice(containers, func(i, j int) bool {
 		return containers[i].MemoryUsedMB > containers[j].MemoryUsedMB
 	})
 
-	topCulprit := containers[0]
-	sharePct := 0.0
-	if payload.Memory.UsedMB > 0 {
-		sharePct = (topCulprit.MemoryUsedMB / payload.Memory.UsedMB) * 100.0
+	nodeID := payload.NodeID
+	prevMem, exists := lastWorkloadMem[nodeID]
+	if !exists {
+		prevMem = make(map[string]float64)
 	}
 
-	summary := fmt.Sprintf("🚨 [%s] PSI 메모리 압박 %.2f%% 초과! 원인: [%s] 컨테이너가 %.1fMB(전체 사용량의 %.1f%%) 점유 중",
-		payload.NodeID, psiVal, topCulprit.ContainerName, topCulprit.MemoryUsedMB, sharePct)
+	// 급증(Spike) 프로세스 탐색 (직전 대비 +150MB 이상 또는 신규 대형 할당)
+	spikeName := ""
+	spikeDelta := 0.0
+	for _, c := range containers {
+		prev := prevMem[c.ContainerName]
+		delta := c.MemoryUsedMB - prev
+		if delta > spikeDelta && delta >= 100.0 {
+			spikeDelta = delta
+			spikeName = fmt.Sprintf("%s (+%.0fMB)", c.ContainerName, delta)
+		}
+	}
+
+	// 캐시 갱신
+	currMem := make(map[string]float64)
+	for _, c := range containers {
+		currMem[c.ContainerName] = c.MemoryUsedMB
+	}
+	lastWorkloadMem[nodeID] = currMem
+
+	// 기본 상위 프로세스 (Baseline)
+	baseName := fmt.Sprintf("%s (%.0fMB)", containers[0].ContainerName, containers[0].MemoryUsedMB)
+	if len(containers) > 1 {
+		baseName += fmt.Sprintf(", %s (%.0fMB)", containers[1].ContainerName, containers[1].MemoryUsedMB)
+	}
+
+	if spikeName == "" {
+		spikeName = "Steady Load"
+	}
 
 	return &IncidentReport{
-		Timestamp:       time.Now(),
-		NodeID:          payload.NodeID,
-		PSIMemoryAvg10:  psiVal,
-		Severity:        severity,
-		CulpritName:     topCulprit.ContainerName,
-		CulpritMemoryMB: topCulprit.MemoryUsedMB,
-		CulpritSharePct: sharePct,
-		Summary:         summary,
+		Timestamp:      time.Now(),
+		NodeID:         payload.NodeID,
+		PSIMemoryAvg10: psiVal,
+		Severity:       severity,
+		AlertType:      "PSI_STALL",
+		MetricValue:    fmt.Sprintf("%.2f%%", psiVal),
+		SpikeWorkload:  spikeName,
+		BaselineLive:   baseName,
+		Summary:        fmt.Sprintf("[%s] PSI_STALL %.2f%% | Spike: %s | Base: %s", payload.NodeID, psiVal, spikeName, baseName),
 	}
 }

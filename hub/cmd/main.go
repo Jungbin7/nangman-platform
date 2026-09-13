@@ -19,8 +19,9 @@ import (
 )
 
 var (
-	incidentMu      sync.Mutex
-	recentIncidents []string
+	alertMu      sync.Mutex
+	activeAlerts = make(map[string]rca.IncidentReport) // nodeID -> active alert
+	alertExpiry  = make(map[string]time.Time)          // nodeID -> resolve timestamp
 )
 
 func main() {
@@ -53,19 +54,23 @@ func main() {
 
 		// 0.001초 종합 RCA 엔진 실행 (발열, OOM, PSI, 저전압 전수 검사)
 		reports := rca.AnalyzeComprehensive(payload)
+		alertMu.Lock()
+		nodeID := payload.NodeID
 		if len(reports) > 0 {
-			incidentMu.Lock()
-			for _, rep := range reports {
-				// 중복 로그 방지 (동일 요약이 이미 최근 1번에 있으면 건너뜀)
-				if len(recentIncidents) == 0 || !strings.Contains(recentIncidents[0], rep.Summary) {
-					recentIncidents = append([]string{fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), rep.Summary)}, recentIncidents...)
+			activeAlerts[nodeID] = reports[0]
+			delete(alertExpiry, nodeID) // 비정상 상태 지속 중이므로 만료 타이머 해제
+		} else {
+			// 정상 회복된 경우: 10초 후 자동 소멸 예약
+			if _, exists := activeAlerts[nodeID]; exists {
+				if _, expiring := alertExpiry[nodeID]; !expiring {
+					alertExpiry[nodeID] = time.Now().Add(10 * time.Second)
+				} else if time.Now().After(alertExpiry[nodeID]) {
+					delete(activeAlerts, nodeID)
+					delete(alertExpiry, nodeID)
 				}
 			}
-			if len(recentIncidents) > 3 {
-				recentIncidents = recentIncidents[:3]
-			}
-			incidentMu.Unlock()
 		}
+		alertMu.Unlock()
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"received"}`))
@@ -277,17 +282,53 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 			}
 		}
 
-		// 5. 최근 인시던트 로그 (최근 2건)
-		fmt.Println("\n\033[1;37mRECENT INCIDENTS & RCA AUDIT\033[0m\033[K")
-		incidentMu.Lock()
-		if len(recentIncidents) == 0 {
-			fmt.Println("  \033[2m• No active kernel pressure incidents. Cluster running smoothly.\033[0m\033[K")
-		} else {
-			for i := 0; i < len(recentIncidents) && i < 2; i++ {
-				fmt.Printf("  \033[0;33m• %s\033[0m\033[K\n", recentIncidents[i])
+		// 5. 활성 장애 관리 (ACTIVE FLEET ALERTS - 이모티콘 배제, 빅테크 고밀도 테이블)
+		alertMu.Lock()
+		nowAlert := time.Now()
+		for nId, expTime := range alertExpiry {
+			if nowAlert.After(expTime) {
+				delete(activeAlerts, nId)
+				delete(alertExpiry, nId)
 			}
 		}
-		incidentMu.Unlock()
+
+		fmt.Printf("\n\033[1;37mACTIVE FLEET ALERTS (%d Nodes Affected)\033[0m\033[K\n", len(activeAlerts))
+		if len(activeAlerts) == 0 {
+			fmt.Println("  \033[1;32m● ALL NODES HEALTHY\033[0m  \033[2mZero active bottlenecks across fleet.\033[0m\033[K")
+			fmt.Println("\033[K")
+		} else {
+			fmt.Printf("\033[2m  %-8s  %-24s  %-10s  %-12s  %-10s  %-24s  %s\033[0m\033[K\n",
+				"TIME", "NODE", "SEVERITY", "ALERT_TYPE", "METRIC", "SPIKE (DELTA)", "BASELINE (LIVE)")
+			count := 0
+			for _, alert := range activeAlerts {
+				if count >= 2 {
+					break
+				}
+				tStr := alert.Timestamp.Format("15:04:05")
+				hName := alert.NodeID
+				if utf8.RuneCountInString(hName) > 24 {
+					hName = string([]rune(hName)[:21]) + "..."
+				}
+				sevColor := "\033[1;33m"
+				if alert.Severity == "CRITICAL" {
+					sevColor = "\033[1;31m"
+				}
+				colSev := sevColor + pad(alert.Severity, 10) + "\033[0m"
+				colSpike := pad(alert.SpikeWorkload, 24)
+				colBase := alert.BaselineLive
+				if utf8.RuneCountInString(colBase) > 28 {
+					colBase = string([]rune(colBase)[:25]) + "..."
+				}
+
+				fmt.Printf("  %-8s  %-24s  %s  %-12s  %-10s  %s  \033[2m%s\033[0m\033[K\n",
+					tStr, pad(hName, 24), colSev, pad(alert.AlertType, 12), pad(alert.MetricValue, 10), colSpike, colBase)
+				count++
+			}
+			if count < 2 {
+				fmt.Println("\033[K")
+			}
+		}
+		alertMu.Unlock()
 
 		// 6. 풋터 (1줄)
 		fmt.Println("\033[2m──────────────────────────────────────────────────────────────────────────────────────\033[0m\033[K")
