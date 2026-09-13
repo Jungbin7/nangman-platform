@@ -297,8 +297,8 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 			fmt.Println("  \033[1;32m● ALL NODES HEALTHY\033[0m  \033[2mZero active bottlenecks across fleet.\033[0m\033[K")
 			fmt.Println("\033[K")
 		} else {
-			fmt.Printf("\033[2m  %-8s  %-24s  %-10s  %-12s  %-10s  %-24s  %s\033[0m\033[K\n",
-				"TIME", "NODE", "SEVERITY", "ALERT_TYPE", "METRIC", "SPIKE (DELTA)", "BASELINE (LIVE)")
+			fmt.Printf("\033[2m  %-8s  %-18s  %-9s  %-12s  %s\033[0m\033[K\n",
+				"TIME", "NODE", "SEVERITY", "TRIGGER", "SUSPECT / WORKLOAD CONTEXT")
 			count := 0
 			for _, alert := range activeAlerts {
 				if count >= 2 {
@@ -306,22 +306,36 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 				}
 				tStr := alert.Timestamp.Format("15:04:05")
 				hName := alert.NodeID
-				if utf8.RuneCountInString(hName) > 24 {
-					hName = string([]rune(hName)[:21]) + "..."
+				// 노드명 간소화 (접두어 phy-nangman-dev- 제거로 가독성 향상)
+				hName = strings.TrimPrefix(hName, "phy-nangman-dev-")
+				hName = strings.TrimPrefix(hName, "vm-nangman-dev-")
+				if utf8.RuneCountInString(hName) > 18 {
+					hName = string([]rune(hName)[:15]) + "..."
 				}
+
 				sevColor := "\033[1;33m"
 				if alert.Severity == "CRITICAL" {
 					sevColor = "\033[1;31m"
 				}
-				colSev := sevColor + pad(alert.Severity, 10) + "\033[0m"
-				colSpike := pad(alert.SpikeWorkload, 24)
-				colBase := alert.BaselineLive
-				if utf8.RuneCountInString(colBase) > 28 {
-					colBase = string([]rune(colBase)[:25]) + "..."
+				colSev := sevColor + pad(alert.Severity, 9) + "\033[0m"
+
+				// 트리거 (ALERT_TYPE + METRIC 결합: 12자)
+				trigStr := fmt.Sprintf("%s %s", alert.AlertType, alert.MetricValue)
+				colTrig := pad(trigStr, 12)
+
+				// 컨텍스트 (38자 이내)
+				var ctxStr string
+				if alert.SpikeWorkload != "" && alert.SpikeWorkload != "Steady Load" {
+					ctxStr = fmt.Sprintf("Spike: %s | Base: %s", alert.SpikeWorkload, alert.BaselineLive)
+				} else {
+					ctxStr = fmt.Sprintf("Steady | Base: %s", alert.BaselineLive)
+				}
+				if utf8.RuneCountInString(ctxStr) > 38 {
+					ctxStr = string([]rune(ctxStr)[:35]) + "..."
 				}
 
-				fmt.Printf("  %-8s  %-24s  %s  %-12s  %-10s  %s  \033[2m%s\033[0m\033[K\n",
-					tStr, pad(hName, 24), colSev, pad(alert.AlertType, 12), pad(alert.MetricValue, 10), colSpike, colBase)
+				fmt.Printf("  %-8s  %-18s  %s  %s  \033[2m%s\033[0m\033[K\n",
+					tStr, pad(hName, 18), colSev, colTrig, ctxStr)
 				count++
 			}
 			if count < 2 {
