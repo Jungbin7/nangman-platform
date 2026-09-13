@@ -297,21 +297,15 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 			fmt.Println("  \033[1;32m● ALL NODES HEALTHY\033[0m  \033[2mZero active bottlenecks across fleet.\033[0m\033[K")
 			fmt.Println("\033[K")
 		} else {
-			fmt.Printf("\033[2m  %-8s  %-18s  %-9s  %-12s  %s\033[0m\033[K\n",
-				"TIME", "NODE", "SEVERITY", "TRIGGER", "SUSPECT / WORKLOAD CONTEXT")
+			fmt.Printf("\033[2m  %-32s  %-9s  %-14s  %s\033[0m\033[K\n",
+				"HOSTNAME", "SEVERITY", "TRIGGER", "WORKLOAD CONTEXT (SPIKE / BASELINE)")
 			count := 0
 			for _, alert := range activeAlerts {
 				if count >= 2 {
 					break
 				}
-				tStr := alert.Timestamp.Format("15:04:05")
+				// 서버 이름 원본 100% 보존 (축소/접두어 삭제 금지)
 				hName := alert.NodeID
-				// 노드명 간소화 (접두어 phy-nangman-dev- 제거로 가독성 향상)
-				hName = strings.TrimPrefix(hName, "phy-nangman-dev-")
-				hName = strings.TrimPrefix(hName, "vm-nangman-dev-")
-				if utf8.RuneCountInString(hName) > 18 {
-					hName = string([]rune(hName)[:15]) + "..."
-				}
 
 				sevColor := "\033[1;33m"
 				if alert.Severity == "CRITICAL" {
@@ -319,23 +313,23 @@ func renderTUIDashboard(clusterStore *store.ClusterStore) {
 				}
 				colSev := sevColor + pad(alert.Severity, 9) + "\033[0m"
 
-				// 트리거 (ALERT_TYPE + METRIC 결합: 12자)
+				// 트리거 (ALERT_TYPE + METRIC: 14자)
 				trigStr := fmt.Sprintf("%s %s", alert.AlertType, alert.MetricValue)
-				colTrig := pad(trigStr, 12)
+				colTrig := pad(trigStr, 14)
 
-				// 컨텍스트 (38자 이내)
+				// 컨텍스트 (28자 이내)
 				var ctxStr string
 				if alert.SpikeWorkload != "" && alert.SpikeWorkload != "Steady Load" {
-					ctxStr = fmt.Sprintf("Spike: %s | Base: %s", alert.SpikeWorkload, alert.BaselineLive)
+					ctxStr = fmt.Sprintf("Spike: %s", alert.SpikeWorkload)
 				} else {
-					ctxStr = fmt.Sprintf("Steady | Base: %s", alert.BaselineLive)
+					ctxStr = fmt.Sprintf("Base: %s", alert.BaselineLive)
 				}
-				if utf8.RuneCountInString(ctxStr) > 38 {
-					ctxStr = string([]rune(ctxStr)[:35]) + "..."
+				if utf8.RuneCountInString(ctxStr) > 28 {
+					ctxStr = string([]rune(ctxStr)[:25]) + "..."
 				}
 
-				fmt.Printf("  %-8s  %-18s  %s  %s  \033[2m%s\033[0m\033[K\n",
-					tStr, pad(hName, 18), colSev, colTrig, ctxStr)
+				fmt.Printf("  %-32s  %s  %s  \033[2m%s\033[0m\033[K\n",
+					pad(hName, 32), colSev, colTrig, ctxStr)
 				count++
 			}
 			if count < 2 {
